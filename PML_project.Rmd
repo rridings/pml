@@ -1,0 +1,125 @@
+---
+title: "PML_Project"
+author: "Rob Ridings"
+date: "November 11, 2015"
+output: html_document
+---
+
+## Description
+
+Six participants performed one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl.  The exercise was done with five variations: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+Each participant was wearing accelerometers on their belt, forearm and arm.  Additionally, there was an accelerometer on the dumbbell.  The training data is the data collected from these accelerometers during each exercise.  The objective of this project is to build a machine learning algorithm to classify a Unilateral Dumbbell Biceps Curl based on data from these four monitors. 
+
+## Loading Data
+
+Load the dataset and partition 60% training and 40% testing.  
+
+```{r}
+library(caret)
+library(plyr)
+library(randomForest)
+
+set.seed(12424)
+
+train_filename <- 'pml-training.csv'
+train_fileurl <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+
+if (!file.exists(train_filename)) {
+  download.file(train_fileurl, train_filename, method = "curl")
+}
+
+data <- read.csv(train_filename)
+
+inTrain <- createDataPartition(y=data$classe, p=.6, list=FALSE)
+training <- data[inTrain,]
+testing <- data[-inTrain,]
+```
+
+## Exploratory
+
+The training data has `r dim(training)[1]` observations and `r dim(training)[2]` variables.  
+
+The first seven variables are not relevant to the predictions.  They have little to no variance and no impact on the classifications.  These variables include user_name, raw_timestamp_part_1, raw_timestamp_part2, cvtd_timestamp, new_window, and num_window.  Several columns have a large numbers of NA's which are removed in pre-processing.  `r count(sapply(data, class) == "factor")[2,2]` columns are factors and the last column is the classe variable (A,B,C,D,E).  
+
+## Pre-processing training dataset
+
+In pre-processing the dataset, the first seven variables are removed.  With the exception of the classe variable all the remaining variables are readings from the monitors.  These variables are converted to numerics, because some are factors.  To cleanup the variables with NAs, any variables that have more than 50% NAs are removed.  Finally, search for variables that are highly correlated by creating a correlation matrix.  Variables that have an absolute correlation of 0.75 or higher are removed from the training dataset.  After the pre-processing, the training dataset is clean and tidy.
+
+```{r}
+asNumeric <- function(x) as.numeric(as.character(x))
+factorsNumeric <- function(d) modifyList(d, lapply(d[, sapply(d, is.factor)], asNumeric))
+
+training <- training[,-c(1:7)]
+classe <- training$classe
+
+suppressWarnings(training <- factorsNumeric(training))
+training <- training[, colSums(is.na(training)) / nrow(training) < .5]
+training <- cbind(training, classe)
+
+correlationMatrix <- cor(training[,1:52])
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.75)
+training <- training[,-highlyCorrelated]
+```
+The training data now has `r dim(training)[1]` observations and `r dim(training)[2]` variables.
+
+## Model Selection
+
+Several models were tried and random forest consistently produced the greatest accuracy.  To prevent overfitting, Random Forest Cross-Validation was run to determine how many variables to use in the model.  The rfcv function shows that error rates between all 32 and 16 variables is quite close, so the top sixteen attributes are selected for the model.
+```{r}
+p <- rfcv(training[,1:32], training[,33])
+p$error.cv
+```
+
+The varImp function is used to rank variable importance and select the top sixteen. 
+```{r}
+fitRF <- train(classe ~ .,data=training,method="rf")
+importanceRF <- varImp(fitRF, scale=TRUE)
+f <- importanceRF$importance
+f <- f[order(f[,1],decreasing=TRUE),,drop=FALSE]
+predictors <- row.names(f)[1:16]
+
+plot(importanceRF, main="Variable Importance in Random Forest model")
+```
+
+The model is a random forest model with 16 predictors.  To help reduce overfitting the model is trained with cross-validation and 5 folds.  
+```{r]}
+tr <- trainControl(method = "cv", number = 5)
+fitRF <- train(classe ~ yaw_belt + pitch_forearm + magnet_dumbbell_z + magnet_belt_y + roll_dumbbell + roll_forearm + gyros_belt_z + total_accel_dumbbell + accel_forearm_z + yaw_dumbbell + roll_arm + magnet_belt_x + gyros_dumbbell_y + magnet_forearm_z + accel_forearm_x + magnet_arm_x,data=training,method="rf",trControl= tr)
+predRF <- predict(fitRF, testing)
+cm <- confusionMatrix(predRF, testing$classe) 
+
+results <- data.frame(predRF,testing$classe)
+colnames(results) <- c("prediction","actual")
+
+accuracy <- round(cm$overall[1] * 100, 2)
+errorRate <- round(count(results$prediction != results$actual)[2,2] / nrow(results) * 100, 2)
+
+qplot(results$prediction, results$actual, colour=results$actual, position = "jitter") + labs(title = "Predicted vs Actual")
+```
+
+The final model produces an Accurary of `r accuracy`% with an sample error rate of `r errorRate`%.  Given the cross-validation on the attribute selection and the model training, it is excepted that model will continue to produce predictions with an accuracy and error rate of the test data.
+
+## Create submission files
+```{r}
+
+test_filename <- 'pml-testing.csv'
+test_fileurl <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+
+if (!file.exists(test_filename)) {
+  download.file(test_fileurl, test_filename, method = "curl")
+}
+validation <- read.csv(test_filename)
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+answers <- predict(fitRF, validation)
+
+pml_write_files(answers)
+```
